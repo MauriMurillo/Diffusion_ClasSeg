@@ -185,13 +185,15 @@ class MidBlock(nn.Module):
             num_heads=4,
             kernel_size=3,
             stride=1,
-            padding=1
+            padding=1,
+            im_only_cross_attention=False,
     ) -> None:
         """
         TODO GroupNorm
         Residual block x -> {NORM->NonLin->Conv -> (TIME EMBEDDING)-> Norm -> NonLin -> Conv} -> x' -> {concat x -> Norm -> SA} -> Concat x' -> Down
         """
         super().__init__()
+        self.im_only_cross_attention = im_only_cross_attention
         self.first_residual_convs = nn.ModuleList([nn.Sequential(
             nn.GroupNorm(8, in_channels),
             non_lin(),
@@ -203,7 +205,7 @@ class MidBlock(nn.Module):
                 padding=padding,
             ),
         ) for _ in range(2)])
-
+        
         self.time_embedding_layer = nn.ModuleList([TimeEmbedder(time_emb_dim, in_channels) for _ in range(2)])
 
         self.self_attention_norms = nn.ModuleList(
@@ -216,12 +218,12 @@ class MidBlock(nn.Module):
             ]
         )
         self.cross_attention_norms = nn.ModuleList(
-            [nn.GroupNorm(8, num_channels=in_channels) for _ in range(2)]
+            [nn.GroupNorm(8, num_channels=in_channels) for _ in range(2 if not im_only_cross_attention else 1)]
         )
         self.cross_attentions = nn.ModuleList(
             [
                 nn.MultiheadAttention(in_channels, num_heads, batch_first=True)
-                for _ in range(2)
+                for _ in range(2 if not im_only_cross_attention else 1)
             ]
         )
         self.pointwise_convolution_im = nn.Conv2d(in_channels, in_channels, kernel_size=1)
@@ -252,19 +254,20 @@ class MidBlock(nn.Module):
         )
         out_attn = out_attn.transpose(1, 2).reshape(N, C, H, W)
         seg_out = seg_out + out_attn
-        # ================ CROSS ATTENTION SEG====================
-        N, C, H, W = seg_out.shape
-        in_attn = seg_out.reshape(N, C, H * W)
-        in_attn = self.cross_attention_norms[1](in_attn).transpose(1, 2)
+        if not self.im_only_cross_attention:
+            # ================ CROSS ATTENTION SEG====================
+            N, C, H, W = seg_out.shape
+            in_attn = seg_out.reshape(N, C, H * W)
+            in_attn = self.cross_attention_norms[1](in_attn).transpose(1, 2)
 
-        kv_attn = im_out.reshape(N, C, H * W)
-        kv_attn = self.cross_attention_norms[1](kv_attn).transpose(1, 2)
+            kv_attn = im_out.reshape(N, C, H * W)
+            kv_attn = self.cross_attention_norms[1](kv_attn).transpose(1, 2)
 
-        out_attn, _ = self.cross_attentions[1](
-            in_attn, kv_attn, kv_attn
-        )
-        out_attn = out_attn.transpose(1, 2).reshape(N, C, H, W)
-        seg_out = seg_out + out_attn
+            out_attn, _ = self.cross_attentions[1](
+                in_attn, kv_attn, kv_attn
+            )
+            out_attn = out_attn.transpose(1, 2).reshape(N, C, H, W)
+            seg_out = seg_out + out_attn
         # ================ CROSS ATTENTION IM====================
         N, C, H, W = im_out.shape
         in_attn = seg_out.reshape(N, C, H * W)
@@ -424,13 +427,15 @@ class UnstableDiffusion(nn.Module):
             layer_depth=2,
             channels=None,
             time_emb_dim=100,
-            image_embedding_dim=64,
+            image_embedding_dim=128,
             do_image_embedding=False,
-            shared_encoder=False
+            shared_encoder=False,
+            image_embedding_dropout=0.25
 ):
 
         super(UnstableDiffusion, self).__init__()
         self.time_emb_dim = time_emb_dim
+        self.image_embedding_dropout = image_embedding_dropout
         self.image_embedding_dim = image_embedding_dim
         self.do_image_embedding = do_image_embedding
         self.im_channels = im_channels
@@ -512,32 +517,30 @@ class UnstableDiffusion(nn.Module):
         # Image Embedding
         if self.do_image_embedding:
             self.image_embedding_generator = nn.Sequential(
-                nn.Conv2d(im_channels, channels[0], kernel_size=3, padding=1),
-                nn.ReLU(),
+                # nn.Conv2d(im_channels, channels[0], kernel_size=3, padding=1),
+                # nn.ReLU(),
                 self._generate_encoder(take_time=False, sequential=True),
-                nn.ReLU(),
-                nn.Conv2d(channels[-1], self.image_embedding_dim, kernel_size=3, padding=1, stride=2),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(start_dim=1)
+                # nn.ReLU(),
+                # nn.Conv2d(channels[-1], self.image_embedding_dim, kernel_size=3, padding=1, stride=2),
+                # nn.AdaptiveAvgPool2d(1),
+                # nn.Flatten(start_dim=1)
             )
 
-            self.image_embedding_integrator = DownBlock(
+            # We want cross attention on the embeddig vs the image at a higher resolution.
+            # Dropout training to encourage variability
+            # 0.25 by default acording to conferece guy 
+            self.image_embedding_integrator = MidBlock(
                 in_channels=channels[-1],
-                out_channels=channels[-1],
                 time_emb_dim=self.image_embedding_dim,
-                downsample=False,
-                attention=True,
-                verbose=False
+                im_only_cross_attention=True
+            )
+            
+            self.seg_embedding_integrator = MidBlock(
+                in_channels=channels[-1],
+                time_emb_dim=self.image_embedding_dim,
+                im_only_cross_attention=True
             )
 
-            self.seg_embedding_integrator = DownBlock(
-                in_channels=channels[-1],
-                out_channels=channels[-1],
-                time_emb_dim=self.image_embedding_dim,
-                downsample=False,
-                attention=True,
-                verbose=False
-            )
 
         self.output_layer_im = nn.Sequential(
             nn.GroupNorm(8, channels[0]),
@@ -686,8 +689,11 @@ class UnstableDiffusion(nn.Module):
         )
         # Raw image embedding for controllable datasewt generation
         if self.do_image_embedding:
-            im_out = self.image_embedding_integrator(im_out, img_embedding)
-            seg_out = self.seg_embedding_integrator(seg_out, img_embedding)
+            # dropuot
+            image_embedding = nn.functional.dropout(image_embedding, p=self.image_embedding_dropout)
+            # attention
+            im_out = self.image_embedding_integrator(im_out, img_embedding, t)
+            seg_out = self.seg_embedding_integrator(seg_out, img_embedding, t)
 
         # ======== MIDDLE ========
         im_out, seg_out = self.middle_layer(im_out, seg_out, t)
