@@ -303,7 +303,8 @@ class UpBlock(nn.Module):
             padding=1,
             upsample=True,
             attention=False,
-            skipped=True
+            skipped=True,
+            do_time_embedding=True
     ) -> None:
         """
         TODO GroupNorm
@@ -330,9 +331,10 @@ class UpBlock(nn.Module):
                 for i in range(num_layers)
             ]
         )
-        self.time_embedding_layer = nn.ModuleList(
-            [TimeEmbedder(time_emb_dim, out_channels) for _ in range(num_layers)]
-        )
+        if do_time_embedding:
+            self.time_embedding_layer = nn.ModuleList(
+                [TimeEmbedder(time_emb_dim, out_channels) for _ in range(num_layers)]
+            )
         self.second_residual_convs = nn.ModuleList(
             [
                 nn.Sequential(
@@ -393,12 +395,13 @@ class UpBlock(nn.Module):
         for layer in range(self.num_layers):
             res_input = out
             out = self.first_residual_convs[layer](out)
-            out = (
-                    out
-                    + self.time_embedding_layer[layer](time_embedding, out.shape[0])[
-                      :, :, None, None
-                      ]
-            )
+            if time_embedding is not None:
+                out = (
+                        out
+                        + self.time_embedding_layer[layer](time_embedding, out.shape[0])[
+                        :, :, None, None
+                        ]
+                )
             out = self.second_residual_convs[layer](out)
             # Skipped connection
             out = out + self.pointwise_convolution[layer](res_input)
@@ -418,8 +421,59 @@ class UpBlock(nn.Module):
         # print('output shape: ', out.shape)
         return out
 
+class ContextIntegrator(nn.Module):
+    def __init__(self, channels, time_emb_dim, context_embedding_dim, context_dropout):
+        super(ContextIntegrator, self).__init__()
+        self.context_embedding_dim = context_embedding_dim
+        self.time_emb_dim = time_emb_dim
+        self.context_dropout = context_dropout
 
-class UnstableDiffusion(nn.Module):
+        self.context_embedding_projector = nn.Sequential(
+            nn.Linear(context_embedding_dim, channels),
+            nn.ReLU(),
+            nn.Linear(channels, channels)
+        )
+        # self.time_embedding_layer = TimeEmbedder(time_emb_dim, channels)
+        
+        # self.cross_attention_norm = nn.GroupNorm(8, num_channels=channels)
+        # self.context_norm = nn.GroupNorm(8, num_channels=channels)
+
+        # self.cross_attention = nn.MultiheadAttention(channels, 4, batch_first=True)
+        self.convolution = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+    def forward(self, x, t, context_embedding):
+        """
+        Integrate time as is normal, then do a cross attention with the context embedding, then do conv, then skip
+        context_embedding: B x context_embedding_dim
+        x: B x C x H x W
+        """
+        # out = x + self.time_embedding_layer(t, x.shape[0])[:, :, None, None]
+        out = x
+        context_embedding = self.context_embedding_projector(context_embedding)
+        context_embedding = torch.functional.F.dropout(context_embedding, p=self.context_dropout, training=True)
+        # Do cross attention betwene the image x ~ [N, C, H, W] and the context embedding ~ [N, C]
+        # N, C, H, W = out.shape
+        # in_attn = out.reshape(N, C, H * W)
+        # in_attn = self.cross_attention_norm(in_attn).transpose(1, 2)
+
+        # kv_attn = context_embedding.reshape(N, C, 1)
+        # kv_attn = self.context_norm(kv_attn).transpose(1, 2)
+
+        # out_attn, _ = self.cross_attention(
+        #     in_attn, kv_attn, kv_attn
+        # )
+
+        # out_attn = out_attn.transpose(1, 2).reshape(N, C, H, W) # [N, C, H, W]
+        out = x + context_embedding[:, :, None, None]
+
+        return self.convolution(out)
+
+
+
+class UnstableDiffusion(nn.Module):        # embed_sample = torch.functional.F.dropout(embed_sample, p=self.context_dropout, training=True)
+
     def __init__(
             self,
             im_channels,
@@ -427,17 +481,16 @@ class UnstableDiffusion(nn.Module):
             layer_depth=2,
             channels=None,
             time_emb_dim=100,
-            image_embedding_dim=128,
-            do_image_embedding=False,
+            context_embedding_dim=512,
+            do_context_embedding=False,
             shared_encoder=False,
-            image_embedding_dropout=0.25
+            context_dropout=0
 ):
 
         super(UnstableDiffusion, self).__init__()
         self.time_emb_dim = time_emb_dim
-        self.image_embedding_dropout = image_embedding_dropout
-        self.image_embedding_dim = image_embedding_dim
-        self.do_image_embedding = do_image_embedding
+        self.context_embedding_dim = context_embedding_dim
+        self.do_context_embedding = do_context_embedding
         self.im_channels = im_channels
         self.seg_channels = seg_channels
         if channels is None:
@@ -490,31 +543,66 @@ class UnstableDiffusion(nn.Module):
         # Decoder SEG
         self.seg_decoder_layers = self._generate_decoder()
 
-        # Image Embedding
-        if self.do_image_embedding:
-            self.image_embedding_generator = nn.Sequential(
-                # nn.Conv2d(im_channels, channels[0], kernel_size=3, padding=1),
-                # nn.ReLU(),
-                self._generate_encoder(take_time=False, sequential=True),
-                # nn.ReLU(),
-                # nn.Conv2d(channels[-1], self.image_embedding_dim, kernel_size=3, padding=1, stride=2),
-                # nn.AdaptiveAvgPool2d(1),
-                # nn.Flatten(start_dim=1)
+        # Context Embedding
+        if self.do_context_embedding:
+            downsampled_dim = int(128 / (2 ** (len(self.channels) - 1)))
+            self.context_embedding_generator = nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(im_channels, channels[0], kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    self._generate_encoder(take_time=False, sequential=True)
+                ),
+                nn.Sequential(
+                    nn.ReLU(),
+                    nn.Conv2d(channels[-1], channels[-1]*2, kernel_size=3, padding=1, stride=2),
+                    nn.Flatten(start_dim=1),
+                    nn.Linear(channels[-1]*2*(downsampled_dim//2)*(downsampled_dim//2), context_embedding_dim)
+                )
+            ])
+
+            self.image_context_integrator = ContextIntegrator(
+                channels=channels[-1],
+                time_emb_dim=self.time_emb_dim,
+                context_embedding_dim=self.context_embedding_dim,
+                context_dropout=context_dropout
             )
 
-            # We want cross attention on the embeddig vs the image at a higher resolution.
-            # Dropout training to encourage variability
-            # 0.25 by default acording to conferece guy 
-            self.image_embedding_integrator = MidBlock(
-                in_channels=channels[-1],
-                time_emb_dim=self.image_embedding_dim,
-                im_only_cross_attention=True
+            self.seg_context_integrator = ContextIntegrator(
+                channels=channels[-1],
+                time_emb_dim=self.time_emb_dim,
+                context_embedding_dim=self.context_embedding_dim,
+                context_dropout=context_dropout
             )
-            
-            self.seg_embedding_integrator = MidBlock(
-                in_channels=channels[-1],
-                time_emb_dim=self.image_embedding_dim,
-                im_only_cross_attention=True
+
+            self.image_context_integrator_first = ContextIntegrator(
+                channels=channels[-1],
+                time_emb_dim=self.time_emb_dim,
+                context_embedding_dim=self.context_embedding_dim,
+                context_dropout=context_dropout
+            )
+
+            self.seg_context_integrator_first = ContextIntegrator(
+                channels=channels[-1],
+                time_emb_dim=self.time_emb_dim,
+                context_embedding_dim=self.context_embedding_dim,
+                context_dropout=context_dropout
+            )
+
+
+            self.image_context_decoder = nn.Sequential(
+                self._generate_decoder(sequential=True, skipped=False)
+            )
+
+            self.output_layer_embed = nn.Sequential(
+                nn.GroupNorm(8, channels[0]),
+                nn.SiLU(),
+                nn.Conv2d(
+                    in_channels=channels[0],
+                    out_channels=im_channels,
+                    kernel_size=3,
+                    padding=1,
+                ),
+                nn.Sigmoid()
             )
 
 
@@ -561,7 +649,7 @@ class UnstableDiffusion(nn.Module):
         if sequential:
             return nn.Sequential(*encoder_layers)
         return encoder_layers
-    
+     
     def _generate_decoder(self, sequential=False):
         decoder_layers = nn.ModuleList()
         for layer in range(self.layers - 1, 0, -1):
@@ -573,6 +661,44 @@ class UnstableDiffusion(nn.Module):
                     out_channels=out_channels,
                     time_emb_dim=self.time_emb_dim,
                     upsample=True,
+                    num_layers=self.layer_depth
+                )
+            )
+        if sequential:
+            return nn.Sequential(*decoder_layers)
+        return decoder_layers
+
+    def _generate_decoder(self, sequential=False, skipped=True):
+        decoder_layers = nn.ModuleList()
+        for layer in range(self.layers - 1, 0, -1):
+            in_channels = self.channels[layer]
+            out_channels = self.channels[layer - 1]
+            decoder_layers.append(
+                UpBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    time_emb_dim=self.time_emb_dim,
+                    upsample=True,
+                    skipped=skipped,
+                    num_layers=self.layer_depth
+                )
+            )
+        if sequential:
+            return nn.Sequential(*decoder_layers)
+        return decoder_layers
+
+    def _generate_decoder(self, sequential=False, skipped=True):
+        decoder_layers = nn.ModuleList()
+        for layer in range(self.layers - 1, 0, -1):
+            in_channels = self.channels[layer]
+            out_channels = self.channels[layer - 1]
+            decoder_layers.append(
+                UpBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    time_emb_dim=self.time_emb_dim,
+                    upsample=True,
+                    skipped=skipped,
                     num_layers=self.layer_depth
                 )
             )
@@ -663,13 +789,20 @@ class UnstableDiffusion(nn.Module):
             im = layer(im, t, None)
         return discriminator[2](im)
     
-    def embed_image(self, im):
-        assert self.do_image_embedding, "Image embedding is not enabled"
-        return self.image_embedding_generator(im)
+    def embed_image(self, im, recon=True):
+        assert self.do_context_embedding, "Image embedding is not enabled"
+        encoded = self.context_embedding_generator[0](im)
+        code = self.context_embedding_generator[1](encoded)
+        decoded = None
+        if recon:
+            decoded = self.image_context_decoder(encoded)
+            decoded = self.output_layer_embed(decoded)
+        
+        return code, decoded
 
     def forward(self, im, seg, t, img_embedding=None):
         assert im.shape[2] == 128, "Only 128 resolution supported"
-        assert (img_embedding is not None) == self.do_image_embedding, "Image embedding is not enabled"
+        assert (img_embedding is not None) == self.do_context_embedding, "context embedding is not enabled"
 
         # ======== TIME ========
         t = self._sinusoidal_embedding(t)
@@ -681,16 +814,16 @@ class UnstableDiffusion(nn.Module):
         im_out, seg_out, skipped_connections_im, skipped_connections_seg = (
             self._encode_forward(im_out, seg_out, t)
         )
-        # Raw image embedding for controllable datasewt generation
-        if self.do_image_embedding:
-            # dropuot
-            image_embedding = nn.functional.dropout(image_embedding, p=self.image_embedding_dropout)
-            # attention
-            im_out = self.image_embedding_integrator(im_out, img_embedding, t)
-            seg_out = self.seg_embedding_integrator(seg_out, img_embedding, t)
-
+        #1st
+        if self.do_context_embedding:
+            im_out = self.image_context_integrator_first(im_out, t, img_embedding)
+            seg_out = self.seg_context_integrator_first(seg_out, t, img_embedding)
         # ======== MIDDLE ========
         im_out, seg_out = self.middle_layer(im_out, seg_out, t)
+        # Raw image embedding for controllable dataset generation
+        if self.do_context_embedding:
+            im_out = self.image_context_integrator(im_out, t, img_embedding)
+            seg_out = self.seg_context_integrator(seg_out, t, img_embedding)
         # ======== DECODE ========
         i = 0
         for im_decode, seg_decode in zip(
