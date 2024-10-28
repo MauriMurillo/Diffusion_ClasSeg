@@ -449,30 +449,15 @@ class ContextIntegrator(nn.Module):
         context_embedding: B x context_embedding_dim
         x: B x C x H x W
         """
-        # out = x + self.time_embedding_layer(t, x.shape[0])[:, :, None, None]
         out = x
         context_embedding = self.context_embedding_projector(context_embedding)
         context_embedding = torch.functional.F.dropout(context_embedding, p=self.context_dropout, training=True)
-        # Do cross attention betwene the image x ~ [N, C, H, W] and the context embedding ~ [N, C]
-        # N, C, H, W = out.shape
-        # in_attn = out.reshape(N, C, H * W)
-        # in_attn = self.cross_attention_norm(in_attn).transpose(1, 2)
-
-        # kv_attn = context_embedding.reshape(N, C, 1)
-        # kv_attn = self.context_norm(kv_attn).transpose(1, 2)
-
-        # out_attn, _ = self.cross_attention(
-        #     in_attn, kv_attn, kv_attn
-        # )
-
-        # out_attn = out_attn.transpose(1, 2).reshape(N, C, H, W) # [N, C, H, W]
         out = x + context_embedding[:, :, None, None]
-
         return self.convolution(out)
 
 
 
-class UnstableDiffusion(nn.Module):        # embed_sample = torch.functional.F.dropout(embed_sample, p=self.context_dropout, training=True)
+class UnstableDiffusion(nn.Module):
 
     def __init__(
             self,
@@ -485,7 +470,7 @@ class UnstableDiffusion(nn.Module):        # embed_sample = torch.functional.F.d
             do_context_embedding=False,
             shared_encoder=False,
             context_dropout=0
-):
+    ):
 
         super(UnstableDiffusion, self).__init__()
         self.time_emb_dim = time_emb_dim
