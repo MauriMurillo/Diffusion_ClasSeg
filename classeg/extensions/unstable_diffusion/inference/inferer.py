@@ -154,6 +154,11 @@ class UnstableDiffusionInferer(Inferer):
                 
                 if dataloader is not None:
                     embed_sample,*_ = next(iter(dataloader))
+                    # embed_sample: [B, C, H, W] -> [B//?, C, H, W] -> [B, C, H, W]
+                    samples_per_cond = 4
+                    embed_sample = embed_sample[0:-1:4, ...]
+                    embed_sample = torch.cat([embed_sample]*samples_per_cond, dim=0)
+
                 xt_im, xt_seg = self.progressive_denoise(batch_size, in_shape, model=model, embed_sample=embed_sample)
                 # Binarize the mask
                 xt_im = xt_im.detach().cpu().permute(0,2,3,1)
@@ -166,7 +171,7 @@ class UnstableDiffusionInferer(Inferer):
 
                     im -= torch.min(im)
                     im *= (255 / torch.max(im))
-                    
+
                     seg *= 255
                     
                     cond -= torch.min(cond)
