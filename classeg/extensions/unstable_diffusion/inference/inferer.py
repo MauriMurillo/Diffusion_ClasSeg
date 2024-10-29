@@ -158,14 +158,21 @@ class UnstableDiffusionInferer(Inferer):
                 # Binarize the mask
                 xt_im = xt_im.detach().cpu().permute(0,2,3,1)
                 xt_seg = xt_seg.detach().cpu().permute(0,2,3,1)
+                conds = embed_sample.detach().cpu().permute(0,2,3,1)
                 for i in range(batch_size):
                     im = xt_im[i]
+                    cond = conds[i]
                     seg = xt_seg[i].round()
 
                     im -= torch.min(im)
                     im *= (255 / torch.max(im))
+                    
                     seg *= 255
+                    
+                    cond -= torch.min(cond)
+                    cond *= (255 / torch.max(cond))
 
+                    cv2.imwrite(f"/home/student/andrewheschl/Desktop/cond/case_{case_num}.jpg", cv2.cvtColor(cond.to(torch.uint8).numpy(), cv2.COLOR_RGB2BGR))
                     cv2.imwrite(f'{save_path}/images/case_{case_num}.jpg', cv2.cvtColor(im.to(torch.uint8).numpy(), cv2.COLOR_RGB2BGR))
                     cv2.imwrite(f'{save_path}/masks/case_{case_num}.jpg', seg.to(torch.uint8).numpy())
                     case_num += 1
@@ -195,19 +202,18 @@ class UnstableDiffusionInferer(Inferer):
         seq = range(self.timesteps-1, -1, -skip)
         if embed_sample is not None:
             embed_sample = embed_sample.to(self.device)
+        
         torch.save(embed_sample, "/home/student/andrewheschl/Documents/Diffusion_ClasSeg/embed_sample.pt")
         print("here")
         if embed_sample is not None and len(embed_sample.shape) > 2: # is it already embedded?
+            # save to /home/student/andrewheschl/Desktop/cond as a png
+
             # TODO this needs to be turned into an actual system
             embed_sample, recon = model.embed_image(embed_sample, recon=True)
             # save all recons and originals to disk
             torch.save(recon, "/home/student/andrewheschl/Documents/Diffusion_ClasSeg/recon.pt")
-            # torch.save(embed_sample, "/home/student/andrewheschl/Documents/Diffusion_ClasSeg/embed_sample.pt")
 
-            # torch.save(embed_sample, "/home/student/andrewheschl/Documents/Diffusion_ClasSeg/embed.pt")
-        # randomly delete some features with dropout like behavior
-        # embed_sample = torch.functional.F.dropout(embed_sample, p=self.context_dropout, training=True)
-
+        
         for t in tqdm(seq, desc="Running Inference"):
             time_tensor = (torch.ones(xt_im.shape[0]) * t).to(xt_im.device).long()
             t_n = t - skip if t !=0 else -1
