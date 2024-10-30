@@ -89,7 +89,8 @@ class UnstableDiffusionInferer(Inferer):
         elif mode == "unstable":
             model = UnstableDiffusion(
                 **self.config["model_args"],
-                do_context_embedding=self.config.get("do_context_embedding", False)
+                do_context_embedding=self.config.get("do_context_embedding", False),
+                context_dropout=float(self.kwargs.get("context_dropout", self.config.get("context_dropout", 0.0))),
             )
         else:
             raise ValueError("You must set mode to unstable or concat.")
@@ -122,10 +123,11 @@ class UnstableDiffusionInferer(Inferer):
     def infer(self, model=None, num_samples=None, embed_sample=None) -> Tuple[torch.Tensor, torch.Tensor]:
         # To infer we need the number of samples to generate, and name of folder
         dataloader = None
+        batch_size = int(self.kwargs.get("batch_size", self.config["batch_size"]))
         if embed_sample is None:
-            dataloader = self.get_dataloader(batch_size=self.config['batch_size'])
+            dataloader = self.get_dataloader(batch_size=batch_size)
 
-        num_samples = num_samples if num_samples is not None else min(int(self.kwargs.get("s", 1000)), len(dataloader.dataset))
+        num_samples = num_samples if num_samples is not None else min(int(self.kwargs.get("s", len(dataloader.dataset))), len(dataloader.dataset))
         run_name = self.run_name
 
         # Inference generates folders with the csv file
@@ -142,7 +144,6 @@ class UnstableDiffusionInferer(Inferer):
 
         model.eval()
         in_shape = list(self.config["target_size"])
-        batch_size = self.config["batch_size"]
 
         
         case_num = 0
@@ -156,7 +157,7 @@ class UnstableDiffusionInferer(Inferer):
                     embed_sample,*_ = next(iter(dataloader))
                     # embed_sample: [B, C, H, W] -> [B//?, C, H, W] -> [B, C, H, W]
                     samples_per_cond = 4
-                    embed_sample = embed_sample[0:-1:4, ...]
+                    embed_sample = embed_sample[0:batch_size:samples_per_cond, ...]
                     embed_sample = torch.cat([embed_sample]*samples_per_cond, dim=0)
 
                 xt_im, xt_seg = self.progressive_denoise(batch_size, in_shape, model=model, embed_sample=embed_sample)
