@@ -1,7 +1,7 @@
 from typing import Tuple, List
 
 from classeg.extensions.unstable_diffusion.utils.utils import make_zero_conv
-
+from classeg.extensions.unstable_diffusion.utils.utils import get_vqgan_from_name
 import torch
 import torch.nn as nn
 from classeg.extensions.unstable_diffusion.model.modules import ScaleULayer
@@ -469,15 +469,28 @@ class UnstableDiffusion(nn.Module):
             context_embedding_dim=512,
             do_context_embedding=False,
             shared_encoder=False,
-            context_dropout=0
+            context_dropout=0,
+            size=None,
+            latent=None
     ):
-
         super(UnstableDiffusion, self).__init__()
         self.time_emb_dim = time_emb_dim
         self.context_embedding_dim = context_embedding_dim
         self.do_context_embedding = do_context_embedding
-        self.im_channels = im_channels
-        self.seg_channels = seg_channels
+        
+        assert size is not None or latent is not None, "a size is needed"
+        self.latent = latent
+        if self.latent is None:
+            self.im_channels = im_channels
+            self.seg_channels = seg_channels
+            self.size = size[0]
+        else:
+            self.vq_im, _ = get_vqgan_from_name(latent["images"])
+            self.vq_ma, _ = get_vqgan_from_name(latent["masks"])
+            self.size = self.vq_im.decoder.z_shape[2]
+            self.im_channels = self.vq_im.decoder.z_shape[1]
+            self.seg_channels = self.vq_im.decoder.z_shape[1]
+
         if channels is None:
             channels = [16, 32, 64]
         layers = len(channels)
@@ -496,14 +509,14 @@ class UnstableDiffusion(nn.Module):
         )
 
         self.im_conv_in = nn.Conv2d(
-            in_channels=im_channels,
+            in_channels=self.im_channels,
             out_channels=channels[0],
             kernel_size=3,
             stride=1,
             padding=1,
         )
         self.seg_conv_in = nn.Conv2d(
-            in_channels=seg_channels,
+            in_channels=self.seg_channels,
             out_channels=channels[0],
             kernel_size=3,
             stride=1,
@@ -530,10 +543,10 @@ class UnstableDiffusion(nn.Module):
 
         # Context Embedding
         if self.do_context_embedding:
-            downsampled_dim = int(128 / (2 ** (len(self.channels) - 1)))
+            downsampled_dim = int(self.size / (2 ** (len(self.channels) - 1)))
             self.context_embedding_generator = nn.ModuleList([
                 nn.Sequential(
-                    nn.Conv2d(im_channels, channels[0], kernel_size=3, padding=1),
+                    nn.Conv2d(self.im_channels, channels[0], kernel_size=3, padding=1),
                     nn.ReLU(),
                     self._generate_encoder(take_time=False, sequential=True)
                 ),
@@ -583,7 +596,7 @@ class UnstableDiffusion(nn.Module):
                 nn.SiLU(),
                 nn.Conv2d(
                     in_channels=channels[0],
-                    out_channels=im_channels,
+                    out_channels=self.im_channels,
                     kernel_size=3,
                     padding=1,
                 ),
@@ -596,7 +609,7 @@ class UnstableDiffusion(nn.Module):
             nn.SiLU(),
             nn.Conv2d(
                 in_channels=channels[0],
-                out_channels=im_channels,
+                out_channels=self.im_channels,
                 kernel_size=3,
                 padding=1,
             ),
@@ -607,7 +620,7 @@ class UnstableDiffusion(nn.Module):
             nn.SiLU(),
             nn.Conv2d(
                 in_channels=channels[0],
-                out_channels=seg_channels,
+                out_channels=self.seg_channels,
                 kernel_size=3,
                 padding=1,
             ),
@@ -634,43 +647,6 @@ class UnstableDiffusion(nn.Module):
         if sequential:
             return nn.Sequential(*encoder_layers)
         return encoder_layers
-     
-    def _generate_decoder(self, sequential=False):
-        decoder_layers = nn.ModuleList()
-        for layer in range(self.layers - 1, 0, -1):
-            in_channels = self.channels[layer]
-            out_channels = self.channels[layer - 1]
-            decoder_layers.append(
-                UpBlock(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    time_emb_dim=self.time_emb_dim,
-                    upsample=True,
-                    num_layers=self.layer_depth
-                )
-            )
-        if sequential:
-            return nn.Sequential(*decoder_layers)
-        return decoder_layers
-
-    def _generate_decoder(self, sequential=False, skipped=True):
-        decoder_layers = nn.ModuleList()
-        for layer in range(self.layers - 1, 0, -1):
-            in_channels = self.channels[layer]
-            out_channels = self.channels[layer - 1]
-            decoder_layers.append(
-                UpBlock(
-                    in_channels=in_channels,
-                    out_channels=out_channels,
-                    time_emb_dim=self.time_emb_dim,
-                    upsample=True,
-                    skipped=skipped,
-                    num_layers=self.layer_depth
-                )
-            )
-        if sequential:
-            return nn.Sequential(*decoder_layers)
-        return decoder_layers
 
     def _generate_decoder(self, sequential=False, skipped=True):
         decoder_layers = nn.ModuleList()
@@ -785,8 +761,25 @@ class UnstableDiffusion(nn.Module):
         
         return code, decoded
 
+    @torch.no_grad()
+    def encode_latent(self, img=None, seg=None):
+        if self.latent:
+            if seg is not None:
+                seg,_,_ = self.vq_ma.encode(seg)
+            if img is not None:
+                img,_,_ = self.vq_im.encode(img)
+        return img, seg
+   
+    @torch.no_grad()
+    def decode_latent(self, img=None, seg=None):
+        if self.latent:
+            if seg is not None:
+                seg = self.vq_ma.decode(seg)
+            if img is not None:
+                img = self.vq_im.decode(img)
+        return img, seg
+    
     def forward(self, im, seg, t, img_embedding=None):
-        assert im.shape[2] == 128, "Only 128 resolution supported"
         assert (img_embedding is not None) == self.do_context_embedding, "context embedding is not enabled"
 
         # ======== TIME ========

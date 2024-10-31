@@ -170,7 +170,7 @@ class UnstableDiffusionTrainer(Trainer):
                 self.logger.log_augmented_image(images[0], mask=segmentations[0].squeeze().numpy())
             images = images.to(self.device, non_blocking=True)
             segmentations = segmentations.to(self.device)
-
+            images, segmentations = self.model.encode_latent(img=images, seg=segmentations)
             images_original = images
 
             im_noise, seg_noise, images, segmentations, t = self.forward_diffuser(images, segmentations)
@@ -180,7 +180,11 @@ class UnstableDiffusionTrainer(Trainer):
             if self.do_context_embedding:
                 context_embedding, context_recon = self.model.embed_image(images_original)
                 if log_image:
-                    self.logger.log_image("Recon", context_recon[0])
+                    if self.model.latent:
+                        log = self.model.decode_latent(context_recon[0].unsqueeze(dim=0))[0]
+                    else:
+                        log = context_recon[0]
+                    self.logger.log_image("Recon", log)
             # do prediction and calculate loss
 
             predicted_noise_im, predicted_noise_seg = self.model(images, segmentations, t, context_embedding)
@@ -281,6 +285,7 @@ class UnstableDiffusionTrainer(Trainer):
             images = images.to(self.device, non_blocking=True)
             segmentations = segmentations.to(self.device, non_blocking=True)
 
+            images, segmentations = self.model.encode_latent(img=images, seg=segmentations)
             images_original = images
 
             noise_im, noise_seg, images, segmentations, t = self.forward_diffuser(images, segmentations)
@@ -359,6 +364,8 @@ class UnstableDiffusionTrainer(Trainer):
             images_to_embed = None  # BxCxHxW
             if self.do_context_embedding:
                 images_to_embed, *_ = next(iter(self.val_dataloader))
+                images_to_embed = images_to_embed.to(self.device)
+                images_to_embed = self.model.encode_latent(img=images_to_embed)
 
             result_im, result_seg = self._inferer.infer(model=self.model, num_samples=self.config["batch_size"], embed_sample=images_to_embed)
             data_for_hist_im_R = result_im[..., 0].flatten()

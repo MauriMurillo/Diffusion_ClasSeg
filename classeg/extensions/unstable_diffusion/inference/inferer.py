@@ -143,7 +143,11 @@ class UnstableDiffusionInferer(Inferer):
         model = model if model is not None else self._get_model()
 
         model.eval()
-        in_shape = list(self.config["target_size"])
+        
+        if self.config["model_args"]["latent"] is not None:
+            in_shape = [model.vq_im.decoder.z_shape[2],model.vq_im.decoder.z_shape[3]]
+        else:
+            in_shape = list(self.config["target_size"])
 
         
         case_num = 0
@@ -155,12 +159,15 @@ class UnstableDiffusionInferer(Inferer):
                 
                 if dataloader is not None:
                     embed_sample,*_ = next(iter(dataloader))
+                    embed_sample = model.encode_latent(img=embed_sample)
                     # embed_sample: [B, C, H, W] -> [B//?, C, H, W] -> [B, C, H, W]
                     samples_per_cond = 4
                     embed_sample = embed_sample[0:batch_size:samples_per_cond, ...]
                     embed_sample = torch.cat([embed_sample]*samples_per_cond, dim=0)
 
                 xt_im, xt_seg = self.progressive_denoise(batch_size, in_shape, model=model, embed_sample=embed_sample)
+
+                xt_im, xt_seg = self.model.decode_latent(img=xt_im, seg=xt_seg)
                 # Binarize the mask
                 xt_im = xt_im.detach().cpu().permute(0,2,3,1)
                 xt_seg = xt_seg.detach().cpu().permute(0,2,3,1)
@@ -191,15 +198,15 @@ class UnstableDiffusionInferer(Inferer):
         xt_im = torch.randn(
             (
                 batch_size,
-                self.config["model_args"]["im_channels"],
+                self.model.im_channels,
                 *in_shape,
             )
         )
         xt_seg = torch.randn(
            (
-               batch_size,
-               self.config["model_args"]["seg_channels"],
-               *in_shape,
+                batch_size,
+                self.model.seg_channels,
+                *in_shape,
            )
         )
         xt_im = xt_im.to(self.device)
@@ -209,15 +216,15 @@ class UnstableDiffusionInferer(Inferer):
         if embed_sample is not None:
             embed_sample = embed_sample.to(self.device)
         
-        torch.save(embed_sample, "/home/student/andrewheschl/Documents/Diffusion_ClasSeg/embed_sample.pt")
-        print("here")
+        torch.save(embed_sample, "./embed_sample.pt")
+        # print("here")
         if embed_sample is not None and len(embed_sample.shape) > 2: # is it already embedded?
             # save to /home/student/andrewheschl/Desktop/cond as a png
 
             # TODO this needs to be turned into an actual system
             embed_sample, recon = model.embed_image(embed_sample, recon=True)
             # save all recons and originals to disk
-            torch.save(recon, "/home/student/andrewheschl/Documents/Diffusion_ClasSeg/recon.pt")
+            torch.save(recon, "./recon.pt")
 
         
         for t in tqdm(seq, desc="Running Inference"):
@@ -251,9 +258,9 @@ class UnstableDiffusionInferer(Inferer):
         if self.training:
             return 
         print("===============================super resolving with super_resolution_v3===============================")
-        super_inferer = SuperResolutionInferer(self.dataset_id, self.fold, "super_resolution_v3", "latest", 
-                                               self.save_path, output_name=f"{self.name}_{self.run_name}", infer_timesteps=self.sr_timesteps)
-        super_inferer.infer()
+        # super_inferer = SuperResolutionInferer(self.dataset_id, self.fold, "super_resolution_v3", "latest", 
+        #                                        self.save_path, output_name=f"{self.name}_{self.run_name}", infer_timesteps=self.sr_timesteps)
+        # super_inferer.infer()
         ...
         
 
