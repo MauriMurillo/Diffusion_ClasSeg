@@ -48,10 +48,7 @@ class UnstableDiffusionTrainer(Trainer):
         :param gpu_id: The gpu for this process to use.
         :param resume_training: None if we should train from scratch, otherwise the model weights that should be used.
         """
-        if gpu_id != "cpu" and gpu_id > 1:
-            raise NotImplementedError("Finihsh DDP implmentation of the dicriminator")
-        self.dicriminator = None
-        self.dicriminator_lr_schedule = None
+
         super().__init__(dataset_name, fold, model_path, gpu_id, unique_folder_name, config_name, resume,
                          cache, world_size)
         self.timesteps = self.config["max_timestep"]
@@ -60,23 +57,16 @@ class UnstableDiffusionTrainer(Trainer):
             self.diffusion_schedule = StepScheduler(self.forward_diffuser, step_size=10, epochs_per_step=5, initial_max=10)
         else:
             self.diffusion_schedule = VoidScheduler(self.forward_diffuser)
-        self.optim, self.d_optim = self.optim
 
-        self.dicriminator_lr_schedule = self.get_lr_scheduler(self.d_optim)
         if resume:
             state = torch.load(f"{self.output_dir}/latest.pth")
 
             self.diffusion_schedule.load_state(state["diffusion_schedule"])
-            self.dicriminator_lr_schedule.load_state_dict(state['dicriminator_lr_schedule'])
-            self.d_optim.load_state_dict(state['d_optim'])
-            if self.dicriminator is not None:
-                self.dicriminator.load_state_dict(state['discriminator'])
 
         self._instantiate_inferer(self.dataset_name, fold, unique_folder_name)
         self.infer_every: int = 15
-        self.recon_loss, self.gan_loss = self.loss
+        self.recon_loss = self.loss
         self.recon_weight = self.config.get("recon_weight", 1)
-        self.gan_weight = self.config.get("gan_weight", 0.5)
         
         self.covariance_weight = self.config.get("covariance_weight", 0)
         self.covariance_loss = CovarianceLoss()
@@ -101,7 +91,7 @@ class UnstableDiffusionTrainer(Trainer):
             self.model.module.load_state_dict(checkpoint["weights"])
         else:
             self.model.load_state_dict(checkpoint["weights"])
-        self.optim[0].load_state_dict(checkpoint["optim"])
+        self.optim.load_state_dict(checkpoint["optim"])
         self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
         self._best_val_loss = checkpoint["best_val_loss"]
 
@@ -142,9 +132,6 @@ class UnstableDiffusionTrainer(Trainer):
     def get_extra_checkpoint_data(self) -> torch.Dict[str, Any] | None:
         return {
             "diffusion_schedule": self.diffusion_schedule.state_dict(),
-            "dicriminator_lr_schedule": self.dicriminator_lr_schedule.state_dict(),
-            "d_optim": self.d_optim.state_dict(),
-            "discriminator": self.dicriminator.state_dict()
         }
 
     @override
@@ -158,7 +145,6 @@ class UnstableDiffusionTrainer(Trainer):
         logger: self.log_helper
         model: self.model
         """
-        self.dicriminator.train()
         running_loss = 0.0
         total_items = 0
         log_image = epoch % 10 == 0
@@ -194,72 +180,17 @@ class UnstableDiffusionTrainer(Trainer):
                 gen_loss += self.context_recon_weight * self.recon_loss(context_recon, images_original)
                 gen_loss += self.covariance_weight * self.covariance_loss(context_embedding)
 
-            dis_loss = 0.0
-            if self.gan_weight > 0:
-                # convert x_t to x_{t-1} and descriminate the goods
-                predicted_im, predicted_seg = self.forward_diffuser.inference_call(
-                    images,
-                    segmentations,
-                    predicted_noise_im,
-                    predicted_noise_seg, t, clamp=False, training_time=True
-                )
-                images, segmentations = self.forward_diffuser.inference_call(
-                    images,
-                    segmentations,
-                    im_noise,
-                    seg_noise, t, clamp=False, training_time=True
-                )
-                # Pass both im and seg together
-                predicted_concat = torch.cat([predicted_im, predicted_seg], dim=1)
-                real_concat = torch.cat([images, segmentations], dim=1)
-                t -= 1
-                # Labels for the discriminator
-                fake_label = torch.zeros((images.shape[0],)).to(self.device)
-                real_label = torch.ones((images.shape[0],)).to(self.device)
-                # Fool the discriminator
-                gen_loss = gen_loss * self.recon_weight
-                gen_loss += self.gan_weight * self.gan_loss(self.model.discriminate(self.dicriminator, predicted_concat, t).squeeze(),
-                                                            real_label)
-                # Train discriminator
-                self.d_optim.zero_grad()
-                real_loss = self.gan_loss(self.model.discriminate(self.dicriminator, real_concat, t).squeeze(), real_label)
-                fake_loss = self.gan_loss(self.model.discriminate(self.dicriminator, predicted_concat.detach(), t).squeeze(), fake_label)
-                # calculate the loss
-                dis_loss += real_loss + fake_loss
-                # dis_loss = dis_loss*self.gan_weight
-                dis_loss.backward()
-
             # update model
             # gen_loss = gen_loss*self.recon_weight
             gen_loss.backward()
 
             self.optim.step()
-            self.d_optim.step()
-            # self.diffusion_schedule.step()
-            # self.dicriminator_lr_schedule.step()
-            # self.lr_scheduler.step()
 
             # gather data
-            running_loss += (gen_loss + dis_loss).item() * images.shape[0]
+            running_loss += gen_loss.item() * images.shape[0]
             total_items += images.shape[0]
 
         return running_loss / total_items
-
-    def log_discriminator_progress(self, epoch, predicted_real, predicted_fake):
-        labels = torch.cat([torch.ones_like(predicted_real), torch.zeros_like(predicted_fake)], dim=0)
-        predictions = torch.cat([predicted_real, predicted_fake], dim=0)
-        self.logger.log_scalar(self.gan_loss(predictions, labels), "Metrics/DisriminatorLoss")
-
-        predictions = torch.sigmoid(predictions)
-        predictions = predictions.detach().cpu().numpy()
-        labels = labels.detach().cpu().numpy()
-
-        predictions[predictions > 0.5] = 1
-        predictions[predictions != 1] = 0
-        correct = (predictions == labels).sum()
-        total = labels.shape[0]
-
-        self.logger.log_scalar(correct / total, "Metrics/DisriminatorAccuracy")
 
     # noinspection PyTypeChecker
     @override
@@ -276,11 +207,6 @@ class UnstableDiffusionTrainer(Trainer):
         running_loss = 0.0
         total_items = 0
         # total_divergence = 0
-        self.dicriminator.eval()
-
-        all_discriminator_predictions_real = []
-        all_discriminator_predictions_fake = []
-
         for images, segmentations, _ in tqdm(self.val_dataloader):
             images = images.to(self.device, non_blocking=True)
             segmentations = segmentations.to(self.device, non_blocking=True)
@@ -302,50 +228,9 @@ class UnstableDiffusionTrainer(Trainer):
             if self.do_context_embedding:
                 gen_loss += self.context_recon_weight * self.recon_loss(context_recon, images_original)
                 gen_loss += self.covariance_weight * self.covariance_loss(context_embedding)
-            # convert x_t to x_{t-1} and descriminate the goods
-            dis_loss = 0.0
-            if self.gan_weight > 0:
-                # convert x_t to x_{t-1} and descriminate the goods
-                predicted_im, predicted_seg = self.forward_diffuser.inference_call(
-                    images,
-                    segmentations,
-                    predicted_noise_im,
-                    predicted_noise_seg, t, clamp=False, training_time=True
-                )
-                images, segmentations = self.forward_diffuser.inference_call(
-                    images,
-                    segmentations,
-                    noise_im,
-                    noise_seg, t, clamp=False, training_time=True
-                )
-                # Pass both im and seg together
-                predicted_concat = torch.cat([predicted_im, predicted_seg], dim=1)
-                real_concat = torch.cat([images, segmentations], dim=1)
-                t -= 1
-                # Labels for the discriminator
-                fake_label = torch.zeros((images.shape[0],)).to(self.device)
-                real_label = torch.ones((images.shape[0],)).to(self.device)
-                # Fool the discriminator
-                gen_loss += self.gan_loss(self.model.discriminate(self.dicriminator, predicted_concat, t).squeeze(), real_label)
-                # Train discriminator
-                predicted_real = self.model.discriminate(self.dicriminator, real_concat, t).squeeze()
-                predicted_fake = self.model.discriminate(self.dicriminator, predicted_concat.detach(), t).squeeze()
-                all_discriminator_predictions_real.extend(predicted_real.tolist())
-                all_discriminator_predictions_fake.extend(predicted_fake.tolist())
 
-                real_loss = self.gan_loss(predicted_real, real_label)
-                fake_loss = self.gan_loss(predicted_fake, fake_label)
-                # calculate the loss
-                dis_loss += real_loss + fake_loss
-
-            running_loss += (self.gan_weight * dis_loss + self.recon_weight * gen_loss).item() * images.shape[0]
+            running_loss += (self.recon_weight * gen_loss).item() * images.shape[0]
             total_items += images.shape[0]
-        # gather data
-        if self.gan_weight > 0:
-            all_discriminator_predictions_real = torch.tensor(all_discriminator_predictions_real)
-            all_discriminator_predictions_fake = torch.tensor(all_discriminator_predictions_fake)
-
-            self.log_discriminator_progress(epoch, all_discriminator_predictions_real, all_discriminator_predictions_fake)
         # self.log_helper.log_scalar("Metrics/seg_divergence", total_divergence / len(self.val_dataloader), epoch)
         return running_loss / total_items
 
@@ -354,7 +239,6 @@ class UnstableDiffusionTrainer(Trainer):
         if epoch == 0:
             self.logger.log_net_structure(self.model)
         self.diffusion_schedule.step()
-        self.dicriminator_lr_schedule.step()
         # self.lr_scheduler.step()
 
         if epoch % self.infer_every == 0 and epoch > 100:
@@ -400,7 +284,6 @@ class UnstableDiffusionTrainer(Trainer):
             )
         else:
             raise ValueError("You must set mode to unstable or concat.")
-        self.dicriminator = model.get_discriminator().to(self.device)
         return model.to(self.device)
 
     def get_lr_scheduler(self, optim=None):
@@ -427,18 +310,12 @@ class UnstableDiffusionTrainer(Trainer):
             weight_decay=self.config.get('weight_decay', 0)
             # momentum=self.config.get('momentum', 0)
         )
-        d_optim = Adam(
-            self.dicriminator.parameters(),
-            lr=self.config["lr"],
-            weight_decay=self.config.get('weight_decay', 0)
-            # momentum=self.config.get('momentum', 0)
-        )
 
         if self.device == 0:
             log(f"Optim being used is {optim}")
         # hacky fix
         self.optim = optim
-        return optim, d_optim
+        return optim
 
     class MSEWithKLDivergenceLoss(nn.Module):
         def __init__(self, kl_weight=0.1):
@@ -460,4 +337,4 @@ class UnstableDiffusionTrainer(Trainer):
         """
         if self.device == 0:
             log("Loss being used is nn.MSELoss()")
-        return (nn.MSELoss(), nn.BCEWithLogitsLoss())
+        return nn.MSELoss()

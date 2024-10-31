@@ -718,37 +718,6 @@ class UnstableDiffusion(nn.Module):
             skipped_connections_seg.append(seg_out)
 
         return im_out, seg_out, skipped_connections_im, skipped_connections_seg
-
-    def get_discriminator(self):
-        return nn.ModuleList([
-            nn.Conv2d(
-                in_channels=self.im_channels + self.seg_channels,
-                out_channels=self.channels[0],
-                kernel_size=3,
-                stride=1,
-                padding=1,
-            ),
-            self._generate_encoder(),
-            nn.Sequential(
-                nn.Conv2d(self.channels[-1], self.channels[-1], kernel_size=3, stride=2, padding=1),
-                nn.SiLU(),
-                nn.Conv2d(self.channels[-1], self.channels[-1], kernel_size=3, stride=2, padding=1),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(self.channels[-1], self.channels[-1] // 2),
-                nn.SiLU(),
-                nn.Linear(self.channels[-1] // 2, 1)
-            )
-        ])
-
-    def discriminate(self, discriminator: nn.Module, im, t):
-        t = self._sinusoidal_embedding(t)
-        t = self.t_proj(t)
-
-        im = discriminator[0](im)
-        for layer in discriminator[1]:
-            im = layer(im, t, None)
-        return discriminator[2](im)
     
     def embed_image(self, im, recon=True):
         assert self.do_context_embedding, "Image embedding is not enabled"
