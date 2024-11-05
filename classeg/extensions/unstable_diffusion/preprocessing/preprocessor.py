@@ -26,7 +26,8 @@ class ExtensionPreprocessor(Preprocessor):
                  processes: int, 
                  normalize: bool, 
                  dataset_desc: str = None, 
-                 data_path=None, 
+                 data_path=None,
+                 second_stage=False,
                  **kwargs):
         """
         :param folds: How many folds to generate.
@@ -38,7 +39,6 @@ class ExtensionPreprocessor(Preprocessor):
         """
         super().__init__(dataset_id, folds, processes, normalize, dataset_desc, **kwargs)
         self.data_path = data_path
-
     def get_config(self) -> Dict:
         return {
             "batch_size": 64,

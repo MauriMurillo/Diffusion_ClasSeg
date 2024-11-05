@@ -109,17 +109,14 @@ class UnstableDiffusionTrainer(Trainer):
 
         train_transforms = A.Compose(
             [
-                A.HorizontalFlip(),
-                A.VerticalFlip(),
-                A.RandomCrop(width=512, height=512, p=1),
-                A.Lambda(image=my_resize, mask=my_resize, p=1)
+                # A.Lambda(image=my_resize, mask=my_resize, p=1)
+                A.ToFloat()
             ],
             is_check_shapes=False
         )
         val_transforms = A.Compose(
             [
-                A.RandomCrop(width=512, height=512, p=1),
-                A.Lambda(image=my_resize, mask=my_resize, p=1),
+                # A.Lambda(image=my_resize, mask=my_resize, p=1),
                 A.ToFloat()
             ],
             is_check_shapes=False
@@ -132,7 +129,25 @@ class UnstableDiffusionTrainer(Trainer):
     def get_extra_checkpoint_data(self) -> torch.Dict[str, Any] | None:
         return {
             "diffusion_schedule": self.diffusion_schedule.state_dict(),
-        }
+        } 
+
+    def run_dummy_input(self, model, device):
+        """
+        Run a dummy input through the model to check for errors.
+        :param model: The model to run the input through.
+        :param device: The device to run the input on.
+        :return: None
+        """
+        model = model.to(device)
+        with torch.no_grad():
+            dummy_input = torch.randn(1, model.im_channels, *[model.vq_im.decoder.z_shape[2],model.vq_im.decoder.z_shape[3]]).to(device)
+            dummy_seg = torch.randn(1, model.seg_channels, *[model.vq_im.decoder.z_shape[2],model.vq_im.decoder.z_shape[3]]).to(device)
+            print(dummy_input.shape)
+
+            dummy_embed, _ = model.embed_image(dummy_input) if self.config["do_context_embedding"] else None
+            dummy_seg[dummy_seg > 0] = 1
+            dummy_seg[dummy_seg != 1] = 0
+            model(dummy_input, dummy_seg, torch.tensor([0]).to(device) ,dummy_embed)
 
     @override
     def train_single_epoch(self, epoch) -> float:
@@ -152,11 +167,11 @@ class UnstableDiffusionTrainer(Trainer):
         # ForkedPdb().set_trace()
         for images, segmentations, _ in tqdm(self.train_dataloader):
             self.optim.zero_grad()
-            if log_image:
+            if log_image and False:
                 self.logger.log_augmented_image(images[0], mask=segmentations[0].squeeze().numpy())
             images = images.to(self.device, non_blocking=True)
             segmentations = segmentations.to(self.device)
-            images, segmentations = self.model.encode_latent(img=images, seg=segmentations)
+            # images, segmentations = self.model.encode_latent(img=images, seg=segmentations)
             images_original = images
 
             im_noise, seg_noise, images, segmentations, t = self.forward_diffuser(images, segmentations)
@@ -211,7 +226,7 @@ class UnstableDiffusionTrainer(Trainer):
             images = images.to(self.device, non_blocking=True)
             segmentations = segmentations.to(self.device, non_blocking=True)
 
-            images, segmentations = self.model.encode_latent(img=images, seg=segmentations)
+            # images, segmentations = self.model.encode_latent(img=images, seg=segmentations)
             images_original = images
 
             noise_im, noise_seg, images, segmentations, t = self.forward_diffuser(images, segmentations)
@@ -249,7 +264,7 @@ class UnstableDiffusionTrainer(Trainer):
             if self.do_context_embedding:
                 images_to_embed, *_ = next(iter(self.val_dataloader))
                 images_to_embed = images_to_embed.to(self.device)
-                images_to_embed = self.model.encode_latent(img=images_to_embed)
+                # images_to_embed = self.model.encode_latent(img=images_to_embed)
 
             result_im, result_seg = self._inferer.infer(model=self.model, num_samples=self.config["batch_size"], embed_sample=images_to_embed)
             data_for_hist_im_R = result_im[..., 0].flatten()
@@ -280,15 +295,17 @@ class UnstableDiffusionTrainer(Trainer):
         elif mode == "unstable":
             model = UnstableDiffusion(
                 **self.config["model_args"],
-                do_context_embedding=self.config.get("do_context_embedding", False)
+                do_context_embedding=self.config.get("do_context_embedding", False),
+
             )
         else:
             raise ValueError("You must set mode to unstable or concat.")
         return model.to(self.device)
 
     def get_lr_scheduler(self, optim=None):
-        if optim is None and isinstance(self.optim, tuple):
-            optim = self.optim[0]
+        if optim is None:
+            optim = self.optim
+
         # scheduler = StepLR(optim, step_size=120, gamma=0.9)
         # scheduler = CyclicLR(optim, self.config["lr"], self.config["lr"]*5, step_size_up=100, step_size_down=100, cycle_momentum=False)
         scheduler = MultiStepLR(optim, milestones=[100, 200, 300, 400, 500, 1000], gamma=0.9)
@@ -314,7 +331,7 @@ class UnstableDiffusionTrainer(Trainer):
         if self.device == 0:
             log(f"Optim being used is {optim}")
         # hacky fix
-        self.optim = optim
+        # self.optim = optim
         return optim
 
     class MSEWithKLDivergenceLoss(nn.Module):

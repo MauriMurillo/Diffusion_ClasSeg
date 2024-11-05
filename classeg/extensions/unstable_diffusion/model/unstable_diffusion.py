@@ -5,7 +5,7 @@ from classeg.extensions.unstable_diffusion.utils.utils import get_vqgan_from_nam
 import torch
 import torch.nn as nn
 from classeg.extensions.unstable_diffusion.model.modules import ScaleULayer
-
+import os
 
 class LateInitializationLayerNorm(nn.Module):
     def __init__(self, **kwargs):
@@ -53,7 +53,8 @@ class DownBlock(nn.Module):
             apply_zero_conv=False,
             apply_scale_u=False,
             takes_time=True,
-            verbose=False
+            verbose=False,
+            skipped_attention=False
     ) -> None:
         """
         TODO GroupNorm
@@ -61,6 +62,7 @@ class DownBlock(nn.Module):
         """
         super().__init__()
         self.perform_attention = attention
+        self.skipped_attention = skipped_attention
         self.verbose = verbose
         self.takes_time = takes_time
         self.apply_zero_conv = apply_zero_conv
@@ -134,9 +136,31 @@ class DownBlock(nn.Module):
             if downsample
             else nn.Identity()
         )
+        print("IM FIRST ATTENTION: ", os.environ.get("IM_FIRST", True) in [True, 't', 'True', 'true', '1'])
+        if skipped_attention:
+            # apply cross atention with x as main skip as other
+            self.cross_attention_norm = nn.GroupNorm(8, num_channels=in_channels)
+            self.cross_attentions = nn.MultiheadAttention(in_channels, num_heads, batch_first=True)
 
     def forward(self, x, time_embedding=None, residual_connection=None):
         assert (time_embedding is not None) == self.takes_time, "Time embedding is required if takes_time is True"
+        if self.skipped_attention and residual_connection is not None:
+            N, C, H, W = x.shape
+            in_attn = x.reshape(N, C, H * W)
+            in_attn = self.cross_attention_norm(in_attn).transpose(1, 2)
+            kv_attn = residual_connection.reshape(N, C, H * W)
+            kv_attn = self.cross_attention_norm(kv_attn).transpose(1, 2)
+            if os.environ.get("IM_FIRST", True) in [True, 't', 'True', 'true', '1']:
+                out_attn, _ = self.cross_attentions(
+                    in_attn, kv_attn, kv_attn
+                )
+            else:
+                out_attn, _ = self.cross_attentions(
+                    kv_attn, in_attn, in_attn
+                )
+            
+            residual_connection = residual_connection + out_attn.transpose(1, 2).reshape(N, C, H, W)
+
         out = x
         if residual_connection is not None:
             if self.apply_zero_conv:
@@ -186,7 +210,7 @@ class MidBlock(nn.Module):
             kernel_size=3,
             stride=1,
             padding=1,
-            im_only_cross_attention=False,
+            im_only_cross_attention=False
     ) -> None:
         """
         TODO GroupNorm
@@ -205,7 +229,7 @@ class MidBlock(nn.Module):
                 padding=padding,
             ),
         ) for _ in range(2)])
-        
+
         self.time_embedding_layer = nn.ModuleList([TimeEmbedder(time_emb_dim, in_channels) for _ in range(2)])
 
         self.self_attention_norms = nn.ModuleList(
@@ -304,7 +328,8 @@ class UpBlock(nn.Module):
             upsample=True,
             attention=False,
             skipped=True,
-            do_time_embedding=True
+            do_time_embedding=True,
+            skipped_attention=False
     ) -> None:
         """
         TODO GroupNorm
@@ -314,6 +339,7 @@ class UpBlock(nn.Module):
         self.perform_attention = attention
         self.num_layers = num_layers
         self.upsample = upsample
+        self.skipped_attention = skipped_attention
         norm_op = nn.GroupNorm
         self.first_residual_convs = nn.ModuleList(
             [
@@ -361,6 +387,14 @@ class UpBlock(nn.Module):
                     for _ in range(num_layers)
                 ]
             )
+
+        if skipped_attention:
+            # apply cross atention with x as main skip as other
+            self.cross_attention_norm = norm_op(8, num_channels=in_channels)
+            self.cross_attentions = nn.MultiheadAttention(in_channels, num_heads, batch_first=True)
+
+                
+
         self.pointwise_convolution = nn.ModuleList(
             [
                 nn.Conv2d(
@@ -378,6 +412,7 @@ class UpBlock(nn.Module):
         )
         self.scale_u = ScaleULayer(in_channels, skipped_count=2)
 
+        print("IM FIRST ATTENTION: ", os.environ.get("IM_FIRST", True) in [True, 't', 'True', 'true', '1'])
     def forward(
             self, x, skipped_connection_encoder=None, skipped_connection_decoder=None, time_embedding=None
     ):
@@ -386,7 +421,24 @@ class UpBlock(nn.Module):
         # print('receive skipped: ', skipped_connection.shape)
         # x = in_channels
         # x = in_channels//2
+        # apply cross
+        if self.skipped_attention:
+            N, C, H, W = x.shape
+            in_attn = x.reshape(N, C, H * W)
+            in_attn = self.cross_attention_norm(in_attn).transpose(1, 2)
+            kv_attn = skipped_connection_decoder.reshape(N, C, H * W)
+            kv_attn = self.cross_attention_norm(kv_attn).transpose(1, 2)
+            if os.environ.get("IM_FIRST", True) in [True, 't', 'True', 'true', '1']:
+                out_attn, _ = self.cross_attentions(
+                    in_attn, kv_attn, kv_attn
+                )
+            else:
+                out_attn, _ = self.cross_attentions(
+                    kv_attn, in_attn, in_attn
+                )
+            skipped_connection_decoder = skipped_connection_decoder + out_attn.transpose(1, 2).reshape(N, C, H, W)
         if skipped_connection_encoder is not None:
+
             x = self.scale_u(x, skipped_connection_encoder, skipped_connection_decoder)
         x = self.upsample_conv(x)
 
@@ -461,8 +513,8 @@ class UnstableDiffusion(nn.Module):
 
     def __init__(
             self,
-            im_channels,
-            seg_channels,
+            im_channels=None,
+            seg_channels=None,
             layer_depth=2,
             channels=None,
             time_emb_dim=100,
@@ -470,7 +522,6 @@ class UnstableDiffusion(nn.Module):
             do_context_embedding=False,
             shared_encoder=False,
             context_dropout=0,
-            size=None,
             latent=None
     ):
         super(UnstableDiffusion, self).__init__()
@@ -478,16 +529,13 @@ class UnstableDiffusion(nn.Module):
         self.context_embedding_dim = context_embedding_dim
         self.do_context_embedding = do_context_embedding
         
-        assert size is not None or latent is not None, "a size is needed"
         self.latent = latent
         if self.latent is None:
             self.im_channels = im_channels
             self.seg_channels = seg_channels
-            self.size = size[0]
         else:
             self.vq_im, _ = get_vqgan_from_name(latent["images"])
             self.vq_ma, _ = get_vqgan_from_name(latent["masks"])
-            self.size = self.vq_im.decoder.z_shape[2]
             self.im_channels = self.vq_im.decoder.z_shape[1]
             self.seg_channels = self.vq_im.decoder.z_shape[1]
 
@@ -524,10 +572,10 @@ class UnstableDiffusion(nn.Module):
         )
 
         # Encoder
-        self.encoder_layers = self._generate_encoder()
+        self.encoder_layers = self._generate_encoder(attention=True)
 
         if not shared_encoder:
-            self.encoder_layers_mask = self._generate_encoder()
+            self.encoder_layers_mask = self._generate_encoder(attention=True)
 
         # Middle
         mid_channels = channels[-1]
@@ -536,14 +584,13 @@ class UnstableDiffusion(nn.Module):
             time_emb_dim=self.time_emb_dim,
         )
         # Decoder IM
-        self.im_decoder_layers = self._generate_decoder()
+        self.im_decoder_layers = self._generate_decoder(attention=True)
 
         # Decoder SEG
-        self.seg_decoder_layers = self._generate_decoder()
+        self.seg_decoder_layers = self._generate_decoder(attention=True)
 
         # Context Embedding
         if self.do_context_embedding:
-            downsampled_dim = int(self.size / (2 ** (len(self.channels) - 1)))
             self.context_embedding_generator = nn.ModuleList([
                 nn.Sequential(
                     nn.Conv2d(self.im_channels, channels[0], kernel_size=3, padding=1),
@@ -554,7 +601,7 @@ class UnstableDiffusion(nn.Module):
                     nn.ReLU(),
                     nn.Conv2d(channels[-1], channels[-1]*2, kernel_size=3, padding=1, stride=2),
                     nn.Flatten(start_dim=1),
-                    nn.Linear(channels[-1]*2*(downsampled_dim//2)*(downsampled_dim//2), context_embedding_dim)
+                    nn.LazyLinear(context_embedding_dim)
                 )
             ])
 
@@ -626,12 +673,13 @@ class UnstableDiffusion(nn.Module):
             ),
         )
 
-    def _generate_encoder(self, take_time=True, sequential=False):
+    def _generate_encoder(self, take_time=True, sequential=False, attention=False):
         encoder_layers = nn.ModuleList()
         for layer in range(self.layers - 1):
             # We want to build a downblock here.
             in_channels = self.channels[layer]
             out_channels = self.channels[layer + 1]
+            # attention on last layer
             encoder_layers.append(
                 DownBlock(
                     in_channels=in_channels,
@@ -641,18 +689,21 @@ class UnstableDiffusion(nn.Module):
                     num_layers=self.layer_depth,
                     apply_zero_conv=False,
                     takes_time=take_time,
-                    apply_scale_u=True
+                    apply_scale_u=True,
+                    attention=(layer == self.layers - 2) and attention,
+                    skipped_attention=attention
                 )
             )
         if sequential:
             return nn.Sequential(*encoder_layers)
         return encoder_layers
 
-    def _generate_decoder(self, sequential=False, skipped=True):
+    def _generate_decoder(self, sequential=False, skipped=True, attention=False):
         decoder_layers = nn.ModuleList()
         for layer in range(self.layers - 1, 0, -1):
             in_channels = self.channels[layer]
             out_channels = self.channels[layer - 1]
+            # attetion on first layer
             decoder_layers.append(
                 UpBlock(
                     in_channels=in_channels,
@@ -660,7 +711,9 @@ class UnstableDiffusion(nn.Module):
                     time_emb_dim=self.time_emb_dim,
                     upsample=True,
                     skipped=skipped,
-                    num_layers=self.layer_depth
+                    num_layers=self.layer_depth,
+                    attention=(layer == 1) and attention,
+                    skipped_attention=attention
                 )
             )
         if sequential:
@@ -710,6 +763,7 @@ class UnstableDiffusion(nn.Module):
             if i == 0:
                 im_out, seg_out = im_encode(im_out, t), seg_encode(seg_out, t)
             else:
+                # modify the skip with cross attention
                 im_out, seg_out = (
                     im_encode(im_out, t, residual_connection=seg_out),
                     seg_encode(seg_out, t, residual_connection=im_out),

@@ -167,7 +167,7 @@ class UnstableDiffusionInferer(Inferer):
 
                 xt_im, xt_seg = self.progressive_denoise(batch_size, in_shape, model=model, embed_sample=embed_sample)
 
-                xt_im, xt_seg = self.model.decode_latent(img=xt_im, seg=xt_seg)
+                xt_im, xt_seg = model.decode_latent(img=xt_im, seg=xt_seg)
                 # Binarize the mask
                 xt_im = xt_im.detach().cpu().permute(0,2,3,1)
                 xt_seg = xt_seg.detach().cpu().permute(0,2,3,1)
@@ -198,14 +198,14 @@ class UnstableDiffusionInferer(Inferer):
         xt_im = torch.randn(
             (
                 batch_size,
-                self.model.im_channels,
+                model.im_channels,
                 *in_shape,
             )
         )
         xt_seg = torch.randn(
            (
                 batch_size,
-                self.model.seg_channels,
+                model.seg_channels,
                 *in_shape,
            )
         )

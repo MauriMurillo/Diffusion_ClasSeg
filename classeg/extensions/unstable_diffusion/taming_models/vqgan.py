@@ -5,9 +5,6 @@ import importlib
 
 from taming.modules.diffusionmodules.model import Encoder, Decoder
 from taming.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer
-from taming.modules.vqvae.quantize import GumbelQuantize
-from taming.modules.vqvae.quantize import EMAVectorQuantizer
-
 
 def get_obj_from_str(string, reload=False):
     module, cls = string.rsplit(".", 1)

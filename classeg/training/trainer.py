@@ -108,6 +108,7 @@ class Trainer:
         # -1 because we increment the epoch by 1 when loading the checkpoint
         self.logger.set_current_epoch(self._current_epoch+1)
         if self.device in [0, "cpu"]:
+            self.run_dummy_input(self.model, self.device)
             all_params = sum(param.numel() for param in self.model.parameters())
             trainable_params = sum(
                 p.numel() for p in self.model.parameters() if p.requires_grad
@@ -118,6 +119,9 @@ class Trainer:
         log(f"Trainer finished initialization on rank {gpu_id}.")
         if self.world_size > 1:
             dist.barrier()
+
+    def run_dummy_input(self, model, device):
+        ...
 
     def _assert_preprocess_ready_for_train(self) -> None:
         """
