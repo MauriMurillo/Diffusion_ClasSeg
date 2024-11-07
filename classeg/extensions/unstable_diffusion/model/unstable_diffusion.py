@@ -572,10 +572,15 @@ class UnstableDiffusion(nn.Module):
         )
 
         # Encoder
-        self.encoder_layers = self._generate_encoder(attention=True)
+        self.encoder_layers = self._generate_encoder(attention=False, mid_blocks=True)
 
         if not shared_encoder:
-            self.encoder_layers_mask = self._generate_encoder(attention=True)
+            self.encoder_layers_mask = self._generate_encoder(attention=False)
+
+        # Encoder mid blocks. one after each layer, except the last... to keep the "middle" idea clear
+        self.encoder_mid_blocks = nn.ModuleList(
+            [MidBlock(in_channels=channels[i+1], time_emb_dim=time_emb_dim) for i in range(layers-1)]
+        )
 
         # Middle
         mid_channels = channels[-1]
@@ -584,10 +589,15 @@ class UnstableDiffusion(nn.Module):
             time_emb_dim=self.time_emb_dim,
         )
         # Decoder IM
-        self.im_decoder_layers = self._generate_decoder(attention=True)
+        self.im_decoder_layers = self._generate_decoder(attention=False)
 
         # Decoder SEG
-        self.seg_decoder_layers = self._generate_decoder(attention=True)
+        self.seg_decoder_layers = self._generate_decoder(attention=False)
+
+        # mid block for before each layer, except the first
+        self.decoder_mid_blocks = nn.ModuleList(
+            [MidBlock(in_channels=channels[i], time_emb_dim=time_emb_dim) for i in range(layers - 1)]
+        )
 
         # Context Embedding
         if self.do_context_embedding:
@@ -673,7 +683,7 @@ class UnstableDiffusion(nn.Module):
             ),
         )
 
-    def _generate_encoder(self, take_time=True, sequential=False, attention=False):
+    def _generate_encoder(self, take_time=True, sequential=False, attention=False, mid_blocks=False):
         encoder_layers = nn.ModuleList()
         for layer in range(self.layers - 1):
             # We want to build a downblock here.
@@ -690,8 +700,8 @@ class UnstableDiffusion(nn.Module):
                     apply_zero_conv=False,
                     takes_time=take_time,
                     apply_scale_u=True,
-                    attention=(layer == self.layers - 2) and attention,
-                    skipped_attention=attention
+                    attention=attention,
+                    skipped_attention=False
                 )
             )
         if sequential:
@@ -712,8 +722,8 @@ class UnstableDiffusion(nn.Module):
                     upsample=True,
                     skipped=skipped,
                     num_layers=self.layer_depth,
-                    attention=(layer == 1) and attention,
-                    skipped_attention=attention
+                    attention=attention,
+                    skipped_attention=False
                 )
             )
         if sequential:
@@ -770,6 +780,7 @@ class UnstableDiffusion(nn.Module):
                 )
             skipped_connections_im.append(im_out)
             skipped_connections_seg.append(seg_out)
+            im_out, seg_out = self.encoder_mid_blocks[i](im_out, seg_out, t)
 
         return im_out, seg_out, skipped_connections_im, skipped_connections_seg
     
@@ -835,6 +846,7 @@ class UnstableDiffusion(nn.Module):
                 im_decode(im_out, skipped_connections_im[-i], seg_out, t),
                 seg_decode(seg_out, skipped_connections_seg[-i], im_out, t),
             )
+            im_out, seg_out = self.decoder_mid_blocks[-i](im_out, seg_out, t)
         # ======== EXIT ========
         im_out = self.output_layer_im(im_out)
         seg_out = self.output_layer_seg(seg_out)

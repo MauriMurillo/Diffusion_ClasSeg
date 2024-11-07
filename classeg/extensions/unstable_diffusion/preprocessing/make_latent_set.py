@@ -10,8 +10,8 @@ import cv2
 @torch.no_grad()
 def make_latent_set(source_set, dest_set, batch_size=64, latentifier=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    resize_image = A.Resize(256, 256, interpolation=cv2.INTER_CUBIC)
-    resize_mask = A.Resize(256, 256, interpolation=cv2.INTER_NEAREST)
+    resize_image = A.Resize(512, 512, interpolation=cv2.INTER_CUBIC)
+    resize_mask = A.Resize(512, 512, interpolation=cv2.INTER_NEAREST)
 
     def my_resize(image=None, mask=None, **kwargs):
         if mask is not None:
@@ -57,7 +57,7 @@ def make_latent_set(source_set, dest_set, batch_size=64, latentifier=None):
     os.makedirs(f"{PREPROCESSED_ROOT}/{dest_set}/fold_{0}/val/labelsTr", exist_ok=True)
     for _set in ["train", "val"]:
         for images, masks, points in tqdm( source_loader_train if _set == "train" else source_loader_val, desc=f"Preprocessing {_set} set"):
-            print(images.shape)
+            # print(images.shape)
 
             masks = masks.to(device, non_blocking=True)
             
@@ -75,4 +75,4 @@ def make_latent_set(source_set, dest_set, batch_size=64, latentifier=None):
 
 
 if __name__ == "__main__":
-    make_latent_set("Dataset_large_421","Dataset_latent_422",batch_size=128,latentifier={"image":"images_vqf8","masks":"masks_vqf8"})
+    make_latent_set("Dataset_large_421","Dataset_latent_423",batch_size=32,latentifier={"image":"images_vqf8_highres_local","masks":"masks_vqf8_highres"})

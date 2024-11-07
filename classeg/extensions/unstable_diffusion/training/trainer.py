@@ -189,8 +189,7 @@ class UnstableDiffusionTrainer(Trainer):
             # do prediction and calculate loss
 
             predicted_noise_im, predicted_noise_seg = self.model(images, segmentations, t, context_embedding)
-            gen_loss = self.recon_loss(torch.concat([predicted_noise_im, predicted_noise_seg], dim=1),
-                                        torch.concat([im_noise, seg_noise], dim=1))
+            gen_loss = self.recon_loss(predicted_noise_im, im_noise) + self.recon_loss(predicted_noise_seg, seg_noise)
             if self.do_context_embedding:
                 gen_loss += self.context_recon_weight * self.recon_loss(context_recon, images_original)
                 gen_loss += self.covariance_weight * self.covariance_loss(context_embedding)
@@ -238,8 +237,8 @@ class UnstableDiffusionTrainer(Trainer):
                 context_embedding, context_recon = self.model.embed_image(images_original)
 
             predicted_noise_im, predicted_noise_seg = self.model(images, segmentations, t, context_embedding)
-            gen_loss = self.recon_loss(torch.concat([predicted_noise_im, predicted_noise_seg], dim=1),
-                            torch.concat([noise_im, noise_seg], dim=1))
+            gen_loss = self.recon_loss(predicted_noise_im, noise_im) + self.recon_loss(predicted_noise_seg, noise_seg)
+
             if self.do_context_embedding:
                 gen_loss += self.context_recon_weight * self.recon_loss(context_recon, images_original)
                 gen_loss += self.covariance_weight * self.covariance_loss(context_embedding)
