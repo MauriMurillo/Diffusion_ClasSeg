@@ -65,9 +65,8 @@ class UnstableDiffusionInferer(Inferer):
 
         val_transforms = A.Compose(
             [
-                A.RandomCrop(width=512, height=512, p=1),
-                A.Lambda(image=my_resize, p=1),
-                A.ToFloat()
+                # A.Lambda(image=my_resize, p=1),
+                # A.ToFloat()
             ],
             is_check_shapes=False
         )
@@ -87,10 +86,11 @@ class UnstableDiffusionInferer(Inferer):
                 **self.config["model_args"]
             )    
         elif mode == "unstable":
+            do = float(self.kwargs.get("context_dropout", self.config['model_args'].get("context_dropout", 0.0)))
+            self.config["model_args"]["context_dropout"] = do
             model = UnstableDiffusion(
                 **self.config["model_args"],
                 do_context_embedding=self.config.get("do_context_embedding", False),
-                context_dropout=float(self.kwargs.get("context_dropout", self.config.get("context_dropout", 0.0))),
             )
         else:
             raise ValueError("You must set mode to unstable or concat.")
@@ -145,13 +145,14 @@ class UnstableDiffusionInferer(Inferer):
         model.eval()
         
         if self.config["model_args"]["latent"] is not None:
-            in_shape = [model.vq_im.decoder.z_shape[2],model.vq_im.decoder.z_shape[3]]
+            in_shape = [model.z_shape[2],model.z_shape[3]]
         else:
             in_shape = list(self.config["target_size"])
 
         
         case_num = 0
         xt_im, xt_seg = None, None
+        vq_im, vq_ma = None, None
         with torch.no_grad():
             for _ in tqdm(range(0,int(np.ceil(num_samples/batch_size))), desc="Running Inference"):
                 if ((num_samples - case_num) < batch_size):
@@ -159,7 +160,8 @@ class UnstableDiffusionInferer(Inferer):
                 
                 if dataloader is not None:
                     embed_sample,*_ = next(iter(dataloader))
-                    embed_sample = model.encode_latent(img=embed_sample)
+                    # print(embed_sample.shape)
+                    # embed_sample = model.encode_latent(img=embed_sample)
                     # embed_sample: [B, C, H, W] -> [B//?, C, H, W] -> [B, C, H, W]
                     samples_per_cond = 4
                     embed_sample = embed_sample[0:batch_size:samples_per_cond, ...]
@@ -167,7 +169,19 @@ class UnstableDiffusionInferer(Inferer):
 
                 xt_im, xt_seg = self.progressive_denoise(batch_size, in_shape, model=model, embed_sample=embed_sample)
 
-                xt_im, xt_seg = model.decode_latent(img=xt_im, seg=xt_seg)
+                decoded = []
+                print("WARNING: DECODING WITH HALF THE BATCH SIZE")
+                # decode with half the batch size
+                decoded = []
+                decoded_Seg = []
+                for i in range(4):
+                    # xt_im, xt_seg, vq_im, vq_ma = model.decode_latent(img=xt_im, seg=xt_seg, vq_im=vq_im, vq_ma=vq_ma)
+                    im, seg, vq_im, vq_ma = model.decode_latent(img=xt_im[i*batch_size//4:(i+1)*batch_size//4], seg=xt_seg[i*batch_size//4:(i+1)*batch_size//4], vq_im=vq_im, vq_ma=vq_ma)
+                    decoded.append(im)
+                    decoded_Seg.append(seg)
+
+                xt_im = torch.cat(decoded, dim=0)
+                xt_seg = torch.cat(decoded_Seg, dim=0)
                 # Binarize the mask
                 xt_im = xt_im.detach().cpu().permute(0,2,3,1)
                 xt_seg = xt_seg.detach().cpu().permute(0,2,3,1)

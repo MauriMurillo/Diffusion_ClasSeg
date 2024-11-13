@@ -422,7 +422,7 @@ class UpBlock(nn.Module):
         # x = in_channels
         # x = in_channels//2
         # apply cross
-        if self.skipped_attention:
+        if self.skipped_attention and skipped_connection_decoder is not None:
             N, C, H, W = x.shape
             in_attn = x.reshape(N, C, H * W)
             in_attn = self.cross_attention_norm(in_attn).transpose(1, 2)
@@ -438,8 +438,8 @@ class UpBlock(nn.Module):
                 )
             skipped_connection_decoder = skipped_connection_decoder + out_attn.transpose(1, 2).reshape(N, C, H, W)
         if skipped_connection_encoder is not None:
-
             x = self.scale_u(x, skipped_connection_encoder, skipped_connection_decoder)
+        
         x = self.upsample_conv(x)
 
         out = x
@@ -534,10 +534,11 @@ class UnstableDiffusion(nn.Module):
             self.im_channels = im_channels
             self.seg_channels = seg_channels
         else:
-            self.vq_im, _ = get_vqgan_from_name(latent["images"])
-            self.vq_ma, _ = get_vqgan_from_name(latent["masks"])
-            self.im_channels = self.vq_im.decoder.z_shape[1]
-            self.seg_channels = self.vq_im.decoder.z_shape[1]
+            vq_im, _ = get_vqgan_from_name(latent["images"])
+            vq_ma, _ = get_vqgan_from_name(latent["masks"])
+            self.im_channels = vq_im.decoder.z_shape[1]
+            self.seg_channels = vq_ma.decoder.z_shape[1]
+            self.z_shape = vq_im.decoder.z_shape
 
         if channels is None:
             channels = [16, 32, 64]
@@ -577,10 +578,10 @@ class UnstableDiffusion(nn.Module):
         if not shared_encoder:
             self.encoder_layers_mask = self._generate_encoder(attention=False)
 
-        # Encoder mid blocks. one after each layer, except the last... to keep the "middle" idea clear
-        self.encoder_mid_blocks = nn.ModuleList(
-            [MidBlock(in_channels=channels[i+1], time_emb_dim=time_emb_dim) for i in range(layers-1)]
-        )
+        # Encoder mid blocks. one after each layer, except the last... to keep the "middle" idea clear !
+        # self.encoder_mid_blocks = nn.ModuleList(
+        #     [MidBlock(in_channels=channels[i+1], time_emb_dim=time_emb_dim) for i in range(layers-1)]
+        # )
 
         # Middle
         mid_channels = channels[-1]
@@ -594,10 +595,10 @@ class UnstableDiffusion(nn.Module):
         # Decoder SEG
         self.seg_decoder_layers = self._generate_decoder(attention=False)
 
-        # mid block for before each layer, except the first
-        self.decoder_mid_blocks = nn.ModuleList(
-            [MidBlock(in_channels=channels[i], time_emb_dim=time_emb_dim) for i in range(layers - 1)]
-        )
+        # mid block for before each layer, except the first !
+        # self.decoder_mid_blocks = nn.ModuleList(
+        #     [MidBlock(in_channels=channels[i], time_emb_dim=time_emb_dim) for i in range(layers - 1)]
+        # )
 
         # Context Embedding
         if self.do_context_embedding:
@@ -689,7 +690,7 @@ class UnstableDiffusion(nn.Module):
             # We want to build a downblock here.
             in_channels = self.channels[layer]
             out_channels = self.channels[layer + 1]
-            # attention on last layer
+            
             encoder_layers.append(
                 DownBlock(
                     in_channels=in_channels,
@@ -723,7 +724,7 @@ class UnstableDiffusion(nn.Module):
                     skipped=skipped,
                     num_layers=self.layer_depth,
                     attention=attention,
-                    skipped_attention=False
+                    skipped_attention=False #!
                 )
             )
         if sequential:
@@ -780,7 +781,7 @@ class UnstableDiffusion(nn.Module):
                 )
             skipped_connections_im.append(im_out)
             skipped_connections_seg.append(seg_out)
-            im_out, seg_out = self.encoder_mid_blocks[i](im_out, seg_out, t)
+            # im_out, seg_out = self.encoder_mid_blocks[i](im_out, seg_out, t)
 
         return im_out, seg_out, skipped_connections_im, skipped_connections_seg
     
@@ -796,22 +797,34 @@ class UnstableDiffusion(nn.Module):
         return code, decoded
 
     @torch.no_grad()
-    def encode_latent(self, img=None, seg=None):
+    def encode_latent(self, img=None, seg=None,vq_im=None, vq_ma=None):
         if self.latent:
             if seg is not None:
-                seg,_,_ = self.vq_ma.encode(seg)
+                if vq_ma is None:
+                    vq_ma, _ = get_vqgan_from_name(self.latent["masks"])
+                    vq_ma = vq_ma.to(seg.device)
+                seg,_,_ = vq_ma.encode(seg)
             if img is not None:
-                img,_,_ = self.vq_im.encode(img)
+                if vq_im is None:
+                    vq_im, _ = get_vqgan_from_name(self.latent["images"])
+                    vq_im = vq_im.to(img.device)
+                img,_,_ = vq_im.encode(img)
         return img, seg
    
     @torch.no_grad()
-    def decode_latent(self, img=None, seg=None):
+    def decode_latent(self, img=None, seg=None, vq_im=None, vq_ma=None):
         if self.latent:
             if seg is not None:
-                seg = self.vq_ma.decode(seg)
+                if vq_ma is None:
+                    vq_ma, _ = get_vqgan_from_name(self.latent["masks"])
+                    vq_ma = vq_ma.to(seg.device)
+                seg = vq_ma.decode(seg)
             if img is not None:
-                img = self.vq_im.decode(img)
-        return img, seg
+                if vq_im is None:
+                    vq_im, _ = get_vqgan_from_name(self.latent["images"])
+                    vq_im = vq_im.to(img.device)
+                img = vq_im.decode(img)
+        return img, seg, vq_im, vq_ma
     
     def forward(self, im, seg, t, img_embedding=None):
         assert (img_embedding is not None) == self.do_context_embedding, "context embedding is not enabled"
@@ -846,7 +859,7 @@ class UnstableDiffusion(nn.Module):
                 im_decode(im_out, skipped_connections_im[-i], seg_out, t),
                 seg_decode(seg_out, skipped_connections_seg[-i], im_out, t),
             )
-            im_out, seg_out = self.decoder_mid_blocks[-i](im_out, seg_out, t)
+            # im_out, seg_out = self.decoder_mid_blocks[-i](im_out, seg_out, t) !
         # ======== EXIT ========
         im_out = self.output_layer_im(im_out)
         seg_out = self.output_layer_seg(seg_out)

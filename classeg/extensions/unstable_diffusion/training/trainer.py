@@ -140,8 +140,8 @@ class UnstableDiffusionTrainer(Trainer):
         """
         model = model.to(device)
         with torch.no_grad():
-            dummy_input = torch.randn(1, model.im_channels, *[model.vq_im.decoder.z_shape[2],model.vq_im.decoder.z_shape[3]]).to(device)
-            dummy_seg = torch.randn(1, model.seg_channels, *[model.vq_im.decoder.z_shape[2],model.vq_im.decoder.z_shape[3]]).to(device)
+            dummy_input = torch.randn(1, model.im_channels, *[model.z_shape[2],model.z_shape[3]]).to(device)
+            dummy_seg = torch.randn(1, model.seg_channels, *[model.z_shape[2],model.z_shape[3]]).to(device)
             print(dummy_input.shape)
 
             dummy_embed, _ = model.embed_image(dummy_input) if self.config["do_context_embedding"] else None
@@ -163,6 +163,7 @@ class UnstableDiffusionTrainer(Trainer):
         running_loss = 0.0
         total_items = 0
         log_image = epoch % 10 == 0
+        log = None
         print(f"Max t sample is {self.diffusion_schedule.compute_max_at_step(self.diffusion_schedule._step)}")
         # ForkedPdb().set_trace()
         for images, segmentations, _ in tqdm(self.train_dataloader):
@@ -181,7 +182,7 @@ class UnstableDiffusionTrainer(Trainer):
             if self.do_context_embedding:
                 context_embedding, context_recon = self.model.embed_image(images_original)
                 if log_image:
-                    if self.model.latent:
+                    if self.model.latent and log is None:
                         log = self.model.decode_latent(context_recon[0].unsqueeze(dim=0))[0]
                     else:
                         log = context_recon[0]
@@ -265,7 +266,7 @@ class UnstableDiffusionTrainer(Trainer):
                 images_to_embed = images_to_embed.to(self.device)
                 # images_to_embed = self.model.encode_latent(img=images_to_embed)
 
-            result_im, result_seg = self._inferer.infer(model=self.model, num_samples=self.config["batch_size"], embed_sample=images_to_embed)
+            result_im, result_seg = self._inferer.infer(model=self.model, num_samples=self.config["batch_size"]//4, embed_sample=images_to_embed[0:self.config["batch_size"]//4])
             data_for_hist_im_R = result_im[..., 0].flatten()
             data_for_hist_im_G = result_im[..., 1].flatten()
             data_for_hist_im_B = result_im[..., 2].flatten()
