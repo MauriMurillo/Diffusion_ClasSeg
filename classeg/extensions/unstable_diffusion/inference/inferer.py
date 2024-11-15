@@ -125,7 +125,7 @@ class UnstableDiffusionInferer(Inferer):
         dataloader = None
         batch_size = int(self.kwargs.get("batch_size", self.config["batch_size"]))
         if embed_sample is None:
-            dataloader = self.get_dataloader(batch_size=batch_size)
+            dataloader = self.get_dataloader(batch_size=batch_size//4)
 
         num_samples = num_samples if num_samples is not None else min(int(self.kwargs.get("s", len(dataloader.dataset))), len(dataloader.dataset))
         run_name = self.run_name
@@ -154,19 +154,16 @@ class UnstableDiffusionInferer(Inferer):
         xt_im, xt_seg = None, None
         vq_im, vq_ma = None, None
         with torch.no_grad():
-            for _ in tqdm(range(0,int(np.ceil(num_samples/batch_size))), desc="Running Inference"):
-                if ((num_samples - case_num) < batch_size):
-                    batch_size = (num_samples - case_num)
-                
+            for _ in tqdm(range(0,int(len(dataloader))), desc="Running Inference"):                
                 if dataloader is not None:
                     embed_sample,*_ = next(iter(dataloader))
                     # print(embed_sample.shape)
                     # embed_sample = model.encode_latent(img=embed_sample)
                     # embed_sample: [B, C, H, W] -> [B//?, C, H, W] -> [B, C, H, W]
                     samples_per_cond = 4
-                    embed_sample = embed_sample[0:batch_size:samples_per_cond, ...]
+                    # embed_sample = embed_sample[0:batch_size:samples_per_cond, ...]
                     embed_sample = torch.cat([embed_sample]*samples_per_cond, dim=0)
-
+                batch_size = embed_sample.shape[0]
                 xt_im, xt_seg = self.progressive_denoise(batch_size, in_shape, model=model, embed_sample=embed_sample)
 
                 decoded = []
