@@ -154,7 +154,7 @@ class UnstableDiffusionInferer(Inferer):
         xt_im, xt_seg = None, None
         vq_im, vq_ma = None, None
         with torch.no_grad():
-            for _ in tqdm(range(0,int(len(dataloader))), desc="Running Inference"):                
+            for _ in tqdm(range(0,int(num_samples if dataloader is None else len(dataloader))), desc="Running Inference"):                
                 if dataloader is not None:
                     embed_sample,*_ = next(iter(dataloader))
                     # print(embed_sample.shape)
@@ -233,9 +233,8 @@ class UnstableDiffusionInferer(Inferer):
             # save to /home/student/andrewheschl/Desktop/cond as a png
 
             # TODO this needs to be turned into an actual system
-            embed_sample, recon = model.embed_image(embed_sample, recon=True)
-            # save all recons and originals to disk
-            torch.save(recon, "./recon.pt")
+            embed_sample, recon = model.embed_image(embed_sample, recon=False)
+            # save al   l recons and originals to disk
 
         
         for t in tqdm(seq, desc="Running Inference"):
@@ -247,7 +246,7 @@ class UnstableDiffusionInferer(Inferer):
                 )
             else:
                 noise_prediction_im, noise_prediciton_seg = model(
-                    xt_im, xt_seg, time_tensor
+                    xt_im, time_tensor
                 )
             xt_im, xt_seg = self.forward_diffuser.inference_call(
                 xt_im,

@@ -23,7 +23,7 @@ class Diffuser:
     def max_t_to_sample(self):
         return self._max_t_to_sample
 
-    def __call__(self, im: torch.Tensor, seg: torch.Tensor, t=None, noise_im=None, noise_seg=None):
+    def __call__(self, im: torch.Tensor, t=None, noise_im=None):
         """
         Given data, randomly samples timesteps and return noise, noisy_data, timesteps.
         Keeps devices uniform.
@@ -40,9 +40,6 @@ class Diffuser:
             # t = torch.randint(1, self._max_t_to_sample, (,)).long()
         if noise_im is None:
             noise_im = torch.randn_like(im).to(im.device)
-        if noise_seg is None:
-            noise_seg = torch.randn_like(seg).to(im.device)
-            # print(noise_seg.shape)
 
         a_bar = self._alpha_bars[t].to(im.device)
 
@@ -50,12 +47,8 @@ class Diffuser:
             a_bar.sqrt().reshape(im.shape[0], 1, 1, 1) * im
             + (1 - a_bar).sqrt().reshape(im.shape[0], 1, 1, 1) * noise_im
         )
-        noisy_seg = (
-            a_bar.sqrt().reshape(seg.shape[0], 1, 1, 1) * seg
-            + (1 - a_bar).sqrt().reshape(seg.shape[0], 1, 1, 1) * noise_seg
-        )
 
-        return noise_im, noise_seg, noisy_im, noisy_seg, t.to(im.device)
+        return noise_im, noisy_im, t.to(im.device)
 
     def set_max_t(self, max_t):
         self._max_t_to_sample = max_t
@@ -63,15 +56,14 @@ class Diffuser:
     def inference_call(
         self, 
         im: torch.Tensor, 
-        seg:torch.Tensor,
         predicted_noise_im: torch.Tensor, 
-        predicted_noise_seg: torch.Tensor, 
         t: int, clamp=False, training_time=False,**kwargs
     ):
         """
         For use in inference mode
         If clamp is true, clamps data between -1 and 1
         """
+        assert not clamp, "Clamping sucks"
         if isinstance(t, int):
             t = torch.tensor([t]).to(im.device)
         alpha_t = self._alphas.to(im.device)[t].to(im.device)
@@ -81,28 +73,19 @@ class Diffuser:
             im - ((1 - alpha_t) / (1 - alpha_t_bar).sqrt()).reshape(-1, 1, 1, 1) * predicted_noise_im
         )
 
-        if clamp:
-            data_im = torch.clip(data_im, -5, 5)
         if not training_time and t > 0:
             z = torch.randn_like(predicted_noise_im).to(predicted_noise_im.device)
             beta_t = self._betas.to(im.device)[t]
             sigma_t = beta_t.sqrt()
             data_im = data_im + sigma_t * z
 
-        # SEG
-        data_seg = (1 / alpha_t.sqrt()).reshape(-1, 1, 1, 1) * (
-            seg - ((1 - alpha_t) / (1 - alpha_t_bar).sqrt()).reshape(-1, 1, 1, 1) * predicted_noise_seg
-        )
-
-        if clamp:
-            data_seg = torch.clip(data_seg, -5, 5)
         if not training_time and t > 0:
-            z = torch.randn_like(predicted_noise_seg).to(predicted_noise_seg.device)
+            z = torch.randn_like(im).to(im.device)
             beta_t = self._betas.to(im.device)[t]
             sigma_t = beta_t.sqrt()
             data_seg = data_seg + sigma_t * z
 
-        return data_im, data_seg
+        return data_im
 
     def prepare_betas(self):
         raise NotImplementedError(
